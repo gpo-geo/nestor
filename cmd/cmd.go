@@ -5,24 +5,21 @@ import (
     "net/http"
 )
 
-func hello(w http.ResponseWriter, req *http.Request) {
+func upload(w http.ResponseWriter, req *http.Request) {
 
-    fmt.Fprintf(w, "hello\n")
+    fmt.Fprintf(w, "Uploaded %d bytes\n", req.ContentLength)
 }
 
-func headers(w http.ResponseWriter, req *http.Request) {
+func download(w http.ResponseWriter, req *http.Request) {
 
-    for name, headers := range req.Header {
-        for _, h := range headers {
-            fmt.Fprintf(w, "%v: %v\n", name, h)
-        }
-    }
+    id := req.URL.Path[len("/download/"):]
+    fmt.Fprintf(w, "Downloaded %s\n", id)
 }
 
 func SetupAndRun() {
 
-    http.HandleFunc("/hello", hello)
-    http.HandleFunc("/headers", headers)
+    http.HandleFunc("/upload/", upload)
+    http.HandleFunc("/download/", download)
 
     http.ListenAndServe(":8090", nil)
 
