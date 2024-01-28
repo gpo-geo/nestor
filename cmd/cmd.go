@@ -1,4 +1,4 @@
-package main
+package cmd
 
 import (
     "fmt"
@@ -19,7 +19,7 @@ func headers(w http.ResponseWriter, req *http.Request) {
     }
 }
 
-func main() {
+func SetupAndRun() {
 
     http.HandleFunc("/hello", hello)
     http.HandleFunc("/headers", headers)
