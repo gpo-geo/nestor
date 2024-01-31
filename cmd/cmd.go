@@ -6,15 +6,24 @@ import (
     "io/ioutil"
     "net/http"
     "log"
+    "strconv"
 )
+
+const apiVer = 1
+var apiPrefix string = "/api/v"+strconv.Itoa(apiVer)
+var uploadEndpoint string = apiPrefix + "/upload/"
+var downloadEndpoint string = apiPrefix + "/download/"
+
+const MAX_UPLOAD_SIZE = 10 * 1024 * 1024 // 10MB
 
 func Upload(w http.ResponseWriter, req *http.Request) {
 
     if req.Method != "POST" {
-        http.Error(w, "Use POST method", http.StatusBadRequest)
+        http.Error(w, "Use POST method", http.StatusMethodNotAllowed)
         return
     }
 
+    req.Body = http.MaxBytesReader(w, req.Body, MAX_UPLOAD_SIZE)
     body, err := ioutil.ReadAll(req.Body)
     if err != nil {
         log.Printf("Error reading body: %v", err)
@@ -28,14 +37,14 @@ func Upload(w http.ResponseWriter, req *http.Request) {
 
 func Download(w http.ResponseWriter, req *http.Request) {
 
-    id := req.URL.Path[len("/download/"):]
+    id := req.URL.Path[len(downloadEndpoint):]
     fmt.Fprintf(w, "Downloaded %s\n", id)
 }
 
 func SetupAndRun() {
 
-    http.HandleFunc("/upload/", Upload)
-    http.HandleFunc("/download/", Download)
+    http.HandleFunc(uploadEndpoint, Upload)
+    http.HandleFunc(downloadEndpoint, Download)
 
     http.ListenAndServe(":8090", nil)
 
