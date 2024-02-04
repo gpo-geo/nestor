@@ -12,6 +12,8 @@ import (
     
     "github.com/aws/aws-sdk-go-v2/config"
     "github.com/aws/aws-sdk-go-v2/service/s3"
+    
+    nestore "github.com/gpo-geo/nestor/store"
 )
 
 var Flags struct {
@@ -60,7 +62,9 @@ func main() {
         }
     })
     
-    store := s3store.New(Flags.S3Bucket, s3Client)
+    cryptClient, _ := nestore.NewEncryptedS3(s3Client, "champignon")
+    
+    store := s3store.New(Flags.S3Bucket, cryptClient)
     store.ObjectPrefix = Flags.S3ObjectPrefix
     store.PreferredPartSize = Flags.S3PartSize
     store.MaxBufferedParts = Flags.S3MaxBufferedParts

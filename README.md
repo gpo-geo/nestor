@@ -82,3 +82,5 @@ Notes:
 
 * Idea to integrate : make a custom [S3Store](https://pkg.go.dev/github.com/tus/tusd/v2@v2.2.2/pkg/s3store#S3Store) ?
   or wrapping an existing store ?
+* However, it's critical to note that ciphertexts must be authenticated (i.e. by
+  using crypto/hmac) before being decrypted in order to avoid creating a padding oracle.
