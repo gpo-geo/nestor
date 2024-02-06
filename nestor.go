@@ -6,7 +6,7 @@ import (
     "net/http"
 
     //~ "github.com/tus/tusd/v2/pkg/filestore"
-    "github.com/tus/tusd/v2/pkg/s3store"
+    //~ "github.com/tus/tusd/v2/pkg/s3store"
     "github.com/tus/tusd/v2/pkg/memorylocker"
     tusd "github.com/tus/tusd/v2/pkg/handler"
     
@@ -16,7 +16,7 @@ import (
     nestore "github.com/gpo-geo/nestor/store"
 )
 
-var Flags struct {
+var flags struct {
     S3Bucket                         string
     S3ObjectPrefix                   string
     S3Endpoint                       string
@@ -26,18 +26,20 @@ var Flags struct {
     S3DisableSSL                     bool
     S3ConcurrentPartUploads          int
     S3TransferAcceleration           bool
+    EncryptionKey                    string
 }
 
 func setup_default_flags() {
-    Flags.S3Bucket = "gpo"
-    Flags.S3ObjectPrefix = ""
-    Flags.S3Endpoint = "http://localhost:9000"
-    Flags.S3PartSize = 50*1024*1024
-    Flags.S3MaxBufferedParts = 20
-    Flags.S3DisableContentHashes = true
-    Flags.S3DisableSSL = true
-    Flags.S3ConcurrentPartUploads = 10
-    Flags.S3TransferAcceleration = false
+    flags.S3Bucket = "gpo"
+    flags.S3ObjectPrefix = ""
+    flags.S3Endpoint = "http://localhost:9000"
+    flags.S3PartSize = 50*1024*1024
+    flags.S3MaxBufferedParts = 20
+    flags.S3DisableContentHashes = true
+    flags.S3DisableSSL = true
+    flags.S3ConcurrentPartUploads = 10
+    flags.S3TransferAcceleration = false
+    flags.EncryptionKey = "champignon"
 }
 
 func main() {
@@ -51,32 +53,31 @@ func main() {
     }
 
     s3Client := s3.NewFromConfig(s3Config, func(o *s3.Options) {
-        o.UseAccelerate = Flags.S3TransferAcceleration
+        o.UseAccelerate = flags.S3TransferAcceleration
     
         // Disable HTTPS and only use HTTP (helpful for debugging requests).
-        o.EndpointOptions.DisableHTTPS = Flags.S3DisableSSL
+        o.EndpointOptions.DisableHTTPS = flags.S3DisableSSL
     
-        if Flags.S3Endpoint != "" {
-            o.BaseEndpoint = &Flags.S3Endpoint
+        if flags.S3Endpoint != "" {
+            o.BaseEndpoint = &flags.S3Endpoint
             o.UsePathStyle = true
         }
     })
     
-    cryptClient, _ := nestore.NewEncryptedS3(s3Client, "champignon")
-    
-    store := s3store.New(Flags.S3Bucket, cryptClient)
-    store.ObjectPrefix = Flags.S3ObjectPrefix
-    store.PreferredPartSize = Flags.S3PartSize
-    store.MaxBufferedParts = Flags.S3MaxBufferedParts
-    store.DisableContentHashes = Flags.S3DisableContentHashes
-    store.SetConcurrentPartUploads(Flags.S3ConcurrentPartUploads)
+    store := nestore.New(flags.S3Bucket, s3Client, flags.EncryptionKey)
+    store.ObjectPrefix = flags.S3ObjectPrefix
+    store.MinPartSize = flags.S3PartSize
+    store.PreferredPartSize = flags.S3PartSize
+    store.MaxPartSize = 2 * flags.S3PartSize
+    store.MaxBufferedParts = flags.S3MaxBufferedParts
+    store.DisableContentHashes = flags.S3DisableContentHashes
+    store.SetConcurrentPartUploads(flags.S3ConcurrentPartUploads)
     
     locker := memorylocker.New()
 
     // A storage backend for tusd may consist of multiple different parts which
     // handle upload creation, locking, termination and so on. The composer is a
-    // place where all those separated pieces are joined together. In this example
-    // we only use the file store but you may plug in multiple.
+    // place where all those separated pieces are joined together.
     composer := tusd.NewStoreComposer()
     store.UseIn(composer)
     locker.UseIn(composer)
