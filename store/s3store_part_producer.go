@@ -157,3 +157,25 @@ func (spp *s3PartProducer) nextPart(size int64) (fileChunk, bool, error) {
 		}, true, nil
 	}
 }
+
+//~ type PaddedReader struct {
+    //~ reader  io.ReadSeeker
+    //~ size    int64
+    //~ pad     int64
+    //~ offset  int64
+    //~ padbuffer []byte
+//~ }
+
+//~ func NewPaddedReader(reader io.ReadSeeker, size int64, pad int64) PaddedReader {
+    //~ return PaddedReader{reader, size, pad, 0, make([]byte, pad)}
+//~ }
+
+//~ func (pr PaddedReader) Read(p []byte) (n int, err error) {
+    //~ padReader = bytes.NewReader(padbuffer)
+    //~ multi := io.MultiReader(reader, padReader)
+    //~ n, err := multi.Read(p)
+//~ }
+
+//~ func (pr PaddedReader) Seek(offset int64, whence int) (int64, error) {
+    //~ // TODO
+//~ }

@@ -5,6 +5,7 @@ import (
     "crypto/rand"
     "crypto/aes"
     "crypto/cipher"
+    "crypto/sha256"
     "crypto/sha512"
     "github.com/tus/tusd/v2/pkg/handler"
     "github.com/tus/tusd/v2/pkg/s3store"
@@ -73,7 +74,7 @@ func New(bucket string, service s3store.S3API, key string) EncryptedStore {
     if err != nil {
         panic(err)
     }
-    
+
     child := s3store.New(bucket, service)
 
     output := EncryptedStore{
@@ -131,7 +132,9 @@ func (store EncryptedStore) observeRequestDuration(start time.Time, label string
 	elapsed := time.Since(start)
 	ms := float64(elapsed.Nanoseconds() / int64(time.Millisecond))
 
-    fmt.Printf("DEBUG: %s : %f ms\n", label, ms)
+    if false {
+        fmt.Printf("DEBUG: %s : %f ms\n", label, ms)
+    }
 	//~ store.requestDurationMetric.WithLabelValues(label).Observe(ms)
 }
 
@@ -168,12 +171,23 @@ func (store EncryptedStore) NewUpload(ctx context.Context, info handler.FileInfo
 	}
 
 	var objectId string
+    var iv string
 	if info.ID == "" {
 		objectId = Uid()
+        iv = objectId
 	} else {
 		// certain tests set info.ID in advance
 		objectId = info.ID
+        objBytes := []byte(objectId)
+        objHashed := sha256.Sum256(objBytes)
+        iv = hex.EncodeToString(objHashed[:store.block.BlockSize()])
 	}
+    
+    // store initial IV in metadata
+    if info.MetaData == nil {
+        info.MetaData = make(map[string]string, 1)
+    }
+    info.MetaData["IV"] = iv
 
 	// Convert meta data into a map of pointers for AWS Go SDK, sigh.
 	metadata := make(map[string]string, len(info.MetaData))
@@ -239,6 +253,7 @@ func (upload *cryptUpload) writeInfo(ctx context.Context, info handler.FileInfo)
 	upload.info = &info
 
 	infoJson, err := json.Marshal(info)
+
 	if err != nil {
 		return err
 	}
@@ -261,13 +276,20 @@ func (upload *cryptUpload) WriteChunk(ctx context.Context, offset int64, src io.
 
 	// Get the total size of the current upload, number of parts to generate next number and whether
 	// an incomplete part exists
-	_, _, incompletePartSize, err := upload.getInternalInfo(ctx)
+	info, _, incompletePartSize, err := upload.getInternalInfo(ctx)
 	if err != nil {
+		return 0, err
+	}
+    
+    // get IV from uid or last fully encoded part
+    iv, err := hex.DecodeString(info.MetaData["IV"])
+
+    if err != nil {
 		return 0, err
 	}
 
 	if incompletePartSize > 0 {
-		incompletePartFile, err := store.downloadIncompletePartForUpload(ctx, upload.objectId)
+		incompletePartFile, err := store.downloadIncompletePartForUpload(ctx, upload.objectId, incompletePartSize, iv)
 		if err != nil {
 			return 0, err
 		}
@@ -285,7 +307,7 @@ func (upload *cryptUpload) WriteChunk(ctx context.Context, offset int64, src io.
 		offset = offset - incompletePartSize
 	}
 
-	bytesUploaded, err := upload.uploadParts(ctx, offset, src)
+	bytesUploaded, err := upload.uploadParts(ctx, offset, src, iv)
 
 	// The size of the incomplete part should not be counted, because the
 	// process of the incomplete part should be fully transparent to the user.
@@ -296,10 +318,20 @@ func (upload *cryptUpload) WriteChunk(ctx context.Context, offset int64, src io.
 
 	upload.info.Offset += bytesUploaded
 
+    if err == nil {
+        // the IV in the metadata needs an update
+        info.MetaData["IV"] = upload.info.MetaData["IV"] // hex.EncodeToString(last_iv)
+
+        infoUdateErr := upload.writeInfo(ctx, info)
+        if infoUdateErr != nil {
+            err = infoUdateErr
+        }
+    }
+
 	return bytesUploaded, err
 }
 
-func (upload *cryptUpload) uploadParts(ctx context.Context, offset int64, src io.Reader) (int64, error) {
+func (upload *cryptUpload) uploadParts(ctx context.Context, offset int64, src io.Reader, iv []byte) (int64, error) {
 	store := upload.store
 
 	// Get the total size of the current upload and number of parts to generate next number
@@ -314,11 +346,23 @@ func (upload *cryptUpload) uploadParts(ctx context.Context, offset int64, src io
 	if err != nil {
 		return 0, err
 	}
+    blocksize := int64(store.block.BlockSize())
 
 	numParts := len(parts)
 	nextPartNum := int32(numParts + 1)
 
-	partProducer, fileChan := newS3PartProducer(src, store.MaxBufferedParts, store.TemporaryDirectory)
+    // Encode the source data
+    buffer, padSize, err := EncodePortableObject(src, store.block, iv)
+    originalSize := len(buffer) - padSize
+    // check corner case: padSize == blocksize and originalSize % optimalPartSize == 0
+    // in this case, we can ignore the last block which would give an incomplete file with only padding
+    if int64(padSize) == blocksize && (int64(originalSize) % optimalPartSize == 0) {
+        buffer = buffer[:originalSize]
+    }
+
+    bufferReader := bytes.NewReader(buffer)
+
+	partProducer, fileChan := newS3PartProducer(bufferReader, store.MaxBufferedParts, store.TemporaryDirectory)
 
 	producerCtx, cancelProducer := context.WithCancel(ctx)
 	defer func() {
@@ -345,9 +389,17 @@ func (upload *cryptUpload) uploadParts(ctx context.Context, offset int64, src io
 		partfile := fileChunk.reader
 		partsize := fileChunk.size
 		closePart := fileChunk.closeReader
+        
+        // the condition "partsize >= store.MinPartSize" is not be adapted if the MinPartSize is equal to blocksize
+        // We need to check the partsize without padding
+        partSizeNoPad := partsize
+        if (bytesUploaded+partsize) > int64(originalSize) {
+            partSizeNoPad -= int64(padSize)
+        }
 
-		isFinalChunk := !info.SizeIsDeferred && (size == offset+bytesUploaded+partsize)
-		if partsize >= store.MinPartSize || isFinalChunk {
+		isFinalChunk := !info.SizeIsDeferred && (size == offset+bytesUploaded+partSizeNoPad)
+        
+		if partSizeNoPad >= store.MinPartSize || isFinalChunk {
 			part := &s3Part{
 				etag:   "",
 				size:   partsize,
@@ -390,11 +442,11 @@ func (upload *cryptUpload) uploadParts(ctx context.Context, offset int64, src io
 				if cerr := closePart(); cerr != nil && uploadErr == nil {
 					uploadErr = cerr
 				}
-				upload.incompletePartSize = partsize
+				upload.incompletePartSize = partSizeNoPad
 			}(partfile, closePart)
 		}
 
-		bytesUploaded += partsize
+		bytesUploaded += partSizeNoPad
 		nextPartNum += 1
 	}
 
@@ -403,6 +455,18 @@ func (upload *cryptUpload) uploadParts(ctx context.Context, offset int64, src io
 	if uploadErr != nil {
 		return 0, uploadErr
 	}
+    
+    // read the latest IV
+    next_iv := iv
+    if bytesUploaded >= optimalPartSize {
+        bytesToLastPart := bytesUploaded
+        remainder := bytesUploaded % optimalPartSize
+        if remainder != 0 {
+            bytesToLastPart -= remainder
+        }
+        next_iv = buffer[(bytesToLastPart-blocksize):bytesToLastPart]
+    }
+    upload.info.MetaData["IV"] = hex.EncodeToString(next_iv)
 
 	return bytesUploaded, partProducer.err
 }
@@ -565,14 +629,52 @@ func (upload cryptUpload) fetchInfo(ctx context.Context) (info handler.FileInfo,
 		err = incompletePartSizeErr
 		return
 	}
+    
+    // Refine the incompletePartSize: get the padding value
+    if incompletePartSize > 0 {
+        tailSize := 2 * store.block.BlockSize()
+        if incompletePartSize < int64(tailSize) {
+            tailSize = store.block.BlockSize()
+        }
+        byteRangeString := fmt.Sprintf("bytes=-%d", tailSize)
+        var incompleteTail *s3.GetObjectOutput
+        incompleteTail, incompletePartSizeErr = store.getIncompletePartForUpload(ctx, upload.objectId, &byteRangeString)
+        if incompletePartSizeErr != nil {
+            err = incompletePartSizeErr
+            return
+        }
+        // Decode the last portion
+        var iv []byte
+        var ivErr error
+        if tailSize == store.block.BlockSize() {
+            iv, ivErr = hex.DecodeString(info.MetaData["IV"])
+            if ivErr != nil {
+                err = ivErr
+                return
+            }
+        } else {
+            iv = make([]byte, store.block.BlockSize())
+            _, ivErr = incompleteTail.Body.Read(iv)
+            if ivErr != nil {
+                err = ivErr
+                return
+            }
+        }
+        decodedTail, decodeErr := DecodeObjectAndTrim(incompleteTail.Body, store.block, iv)
+        if decodeErr != nil {
+            err = decodeErr
+            return
+        }
+        padSize := store.block.BlockSize() - len(decodedTail)
+        incompletePartSize = incompletePartSize - int64(padSize)
+    }
 
 	// The offset is the sum of all part sizes and the size of the incomplete part file.
 	offset := incompletePartSize
 	for _, part := range parts {
 		offset += part.size
 	}
-
-	info.Offset = offset
+    info.Offset = offset
 
 	return info, parts, incompletePartSize, nil
 }
@@ -919,9 +1021,9 @@ func (store EncryptedStore) listAllParts(ctx context.Context, objectId string, m
 	return parts, nil
 }
 
-func (store EncryptedStore) downloadIncompletePartForUpload(ctx context.Context, uploadId string) (*os.File, error) {
+func (store EncryptedStore) downloadIncompletePartForUpload(ctx context.Context, uploadId string, incompletePartSize int64, iv []byte) (*os.File, error) {
 	t := time.Now()
-	incompleteUploadObject, err := store.getIncompletePartForUpload(ctx, uploadId)
+	incompleteUploadObject, err := store.getIncompletePartForUpload(ctx, uploadId, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -935,13 +1037,20 @@ func (store EncryptedStore) downloadIncompletePartForUpload(ctx context.Context,
 	if err != nil {
 		return nil, err
 	}
+    
+    // --------------------------------
+    decodedPart, err := DecodeObjectAndTrim(incompleteUploadObject.Body, store.block, iv)
+    
+    decodedReader := bytes.NewReader(decodedPart)
+    
+    // --------------------------------
 
-	n, err := io.Copy(partFile, incompleteUploadObject.Body)
+	n, err := io.Copy(partFile, decodedReader)
 	store.observeRequestDuration(t, metricGetPartObject)
 	if err != nil {
 		return nil, err
 	}
-	if n < *incompleteUploadObject.ContentLength {
+	if n < int64(len(decodedPart)) {
 		return nil, errors.New("short read of incomplete upload")
 	}
 
@@ -953,10 +1062,11 @@ func (store EncryptedStore) downloadIncompletePartForUpload(ctx context.Context,
 	return partFile, nil
 }
 
-func (store EncryptedStore) getIncompletePartForUpload(ctx context.Context, uploadId string) (*s3.GetObjectOutput, error) {
+func (store EncryptedStore) getIncompletePartForUpload(ctx context.Context, uploadId string, byteRange *string) (*s3.GetObjectOutput, error) {
 	obj, err := store.Service.GetObject(ctx, &s3.GetObjectInput{
 		Bucket: aws.String(store.Bucket),
 		Key:    store.metadataKeyWithPrefix(uploadId + ".part"),
+        Range: byteRange,
 	})
 
 	if err != nil && (isAwsError[*types.NoSuchKey](err) || isAwsError[*types.NotFound](err) || isAwsErrorCode(err, "AccessDenied")) || isAwsErrorCode(err, "Forbidden") {
@@ -1067,6 +1177,13 @@ func (store EncryptedStore) calcOptimalPartSize(size int64) (optimalPartSize int
 	default:
 		optimalPartSize = size/store.MaxMultipartParts + 1
 	}
+    
+    // then : ceil the optimal size to a multiple of block size
+    //~ remainder := optimalPartSize%store.block.BlockSize()
+    //~ if remainder != 0 {
+        //~ optimalPartSize += store.block.BlockSize() - remainder
+    //~ }
+    optimalPartSize = RoundToNextMultiple(optimalPartSize, int64(store.block.BlockSize()))
 
 	// optimalPartSize must never exceed MaxPartSize
 	if optimalPartSize > store.MaxPartSize {

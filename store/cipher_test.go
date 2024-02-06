@@ -16,7 +16,7 @@ func TestEncrypt(t *testing.T) {
     length_before := len(plaintext)
     
     // apply padding
-    plaintext = PadBuffer(plaintext, aes.BlockSize)
+    plaintext, _ = PadBuffer(plaintext, aes.BlockSize)
     
     length_after := len(plaintext)
     if uint(plaintext[length_after-1]) != uint(length_after-length_before) {
@@ -62,6 +62,19 @@ func TestEncrypt(t *testing.T) {
     if ! bytes.Equal(ciphertext[aes.BlockSize:], secondcipher) {
         t.Fatal("Second cipher text is not the end of first cipher text")
     }
+    
+    // check with EncodeObject
+    plaintext = []byte("This is a secret that I don't want to share with the world wide web")
+    fakeReadCloser := bytes.NewReader(plaintext)
+    otherciphertext, padSize, err := EncodeObject(fakeReadCloser, block, iv)
+    
+    if padSize != int(length_after-length_before) {
+        t.Fatal("Wrong pad size")
+    }
+    
+    if ! bytes.Equal(otherciphertext, ciphertext) {
+        t.Fatal("Output of EncodeObject is different from previous cipher text")
+    }
 }
 
 func TestDecrypt(t *testing.T) {
@@ -98,5 +111,49 @@ func TestDecrypt(t *testing.T) {
     
     if ! bytes.Equal(partialresult, plaintext[aes.BlockSize:3*aes.BlockSize]) {
         t.Fatal("Partial decrypted message don't match with original")
+    }
+    
+    // check with DecodeObject
+    fakeReader := bytes.NewReader(ciphertext)
+    otherresult, err := DecodeObject(fakeReader, int64(original_length), block, iv)
+    if err != nil {
+        t.Fatal(err)
+    }
+    
+    if ! bytes.Equal(otherresult, plaintext) {
+        fmt.Printf("'%s' vs '%s'", otherresult, plaintext)
+        t.Fatal("Output of DecodeObject is different from original text")
+    }
+}
+
+
+func TestDecodeAndTrim(t *testing.T) {
+    key, _ := hex.DecodeString("6368616e676520746869732070617373")
+    iv, _ := hex.DecodeString("76e1976518c9209525161f85c1093290")
+
+    block, err := aes.NewCipher(key)
+    if err != nil {
+        t.Fatal(err)
+    }
+    
+    // check with EncodeObject
+    plaintext := []byte("This is a sec")
+    myPlainReader := bytes.NewReader(plaintext)
+    ciphertext, padSize, err := EncodePortableObject(myPlainReader, block, iv)
+    
+    if padSize != 3 {
+        t.Fatal("Wrong pad size")
+    }
+    
+    // check with DecodeObjectAndTrim
+    cipherReader := bytes.NewReader(ciphertext)
+    result, err := DecodeObjectAndTrim(cipherReader, block, iv)
+    if err != nil {
+        t.Fatal(err)
+    }
+    
+    if ! bytes.Equal(result, plaintext) {
+        fmt.Printf("'%s' vs '%s'", result, plaintext)
+        t.Fatal("Output of DecodeObject is different from original text")
     }
 }

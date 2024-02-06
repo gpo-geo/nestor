@@ -93,8 +93,13 @@ func (m PutObjectInputMatcher) Matches(x interface{}) bool {
 
 	input.Body = nil
 	m.expect.Body = nil
+    
+    compareWithoutBody := reflect.DeepEqual(m.expect, input)
+    
+    input.Body = inputBody
+    m.expect.Body = expectBody
 
-	return reflect.DeepEqual(m.expect, input)
+	return compareWithoutBody
 }
 
 func (m PutObjectInputMatcher) String() string {
