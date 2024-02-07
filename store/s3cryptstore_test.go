@@ -528,12 +528,21 @@ func TestGetReader(t *testing.T) {
 
     s3obj := NewMockS3API(mockCtrl)
     store := New("bucket", s3obj, "champignon")
+    
+    // encoded version of "hello world"
+    ciphertext, err := hex.DecodeString("239052d5fdcfb468e2aa64cd3962b8cf")
 
+    s3obj.EXPECT().HeadObject(context.Background(), &s3.HeadObjectInput{
+        Bucket: aws.String("bucket"),
+        Key:    aws.String("uploadId"),
+    }).Return(&s3.HeadObjectOutput{
+        ContentLength: aws.Int64(16),
+    }, nil)
     s3obj.EXPECT().GetObject(context.Background(), &s3.GetObjectInput{
         Bucket: aws.String("bucket"),
         Key:    aws.String("uploadId"),
     }).Return(&s3.GetObjectOutput{
-        Body: io.NopCloser(bytes.NewReader([]byte(`hello world`))),
+        Body: io.NopCloser(bytes.NewReader(ciphertext)),
     }, nil)
 
     upload, err := store.GetUpload(context.Background(), "uploadId+multipartId")
@@ -553,10 +562,10 @@ func TestGetReaderNotFound(t *testing.T) {
     store := New("bucket", s3obj, "champignon")
 
     gomock.InOrder(
-        s3obj.EXPECT().GetObject(context.Background(), &s3.GetObjectInput{
+        s3obj.EXPECT().HeadObject(context.Background(), &s3.HeadObjectInput{
             Bucket: aws.String("bucket"),
             Key:    aws.String("uploadId"),
-        }).Return(nil, &types.NoSuchKey{}),
+        }).Return(nil, &types.NotFound{}),
         s3obj.EXPECT().ListParts(context.Background(), &s3.ListPartsInput{
             Bucket:   aws.String("bucket"),
             Key:      aws.String("uploadId"),
@@ -582,10 +591,10 @@ func TestGetReaderNotFinished(t *testing.T) {
     store := New("bucket", s3obj, "champignon")
 
     gomock.InOrder(
-        s3obj.EXPECT().GetObject(context.Background(), &s3.GetObjectInput{
+        s3obj.EXPECT().HeadObject(context.Background(), &s3.HeadObjectInput{
             Bucket: aws.String("bucket"),
             Key:    aws.String("uploadId"),
-        }).Return(nil, &types.NoSuchKey{}),
+        }).Return(nil, &types.NotFound{}),
         s3obj.EXPECT().ListParts(context.Background(), &s3.ListPartsInput{
             Bucket:   aws.String("bucket"),
             Key:      aws.String("uploadId"),
@@ -602,6 +611,32 @@ func TestGetReaderNotFinished(t *testing.T) {
     content, err := upload.GetReader(context.Background())
     assert.Nil(content)
     assert.Equal("ERR_INCOMPLETE_UPLOAD: cannot stream non-finished upload", err.Error())
+}
+
+func TestGetReaderTooLarge(t *testing.T) {
+    mockCtrl := gomock.NewController(t)
+    defer mockCtrl.Finish()
+    assert := assert.New(t)
+
+    s3obj := NewMockS3API(mockCtrl)
+    store := New("bucket", s3obj, "champignon")
+    store.MaxBufferedParts = 20
+    store.MaxPartSize = 50 * 1024 * 1024
+
+    s3obj.EXPECT().HeadObject(context.Background(), &s3.HeadObjectInput{
+        Bucket: aws.String("bucket"),
+        Key:    aws.String("uploadId"),
+    }).Return(&s3.HeadObjectOutput{
+        ContentLength: aws.Int64(50 * 1024 * 1024 * 1024),
+    }, nil)
+
+
+    upload, err := store.GetUpload(context.Background(), "uploadId+multipartId")
+    assert.Nil(err)
+
+    content, err := upload.GetReader(context.Background())
+    assert.Nil(content)
+    assert.Equal("ERR_FILE_TOO_LARGE: file too large, specify a Range in your request", err.Error())
 }
 
 //~ func TestDeclareLength(t *testing.T) {

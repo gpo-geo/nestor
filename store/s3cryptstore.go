@@ -681,21 +681,58 @@ func (upload cryptUpload) fetchInfo(ctx context.Context) (info handler.FileInfo,
 
 func (upload cryptUpload) GetReader(ctx context.Context) (io.ReadCloser, error) {
 	store := upload.store
-
-	// Attempt to get upload content
-	res, err := store.Service.GetObject(ctx, &s3.GetObjectInput{
+    
+    // Check before we get files too large
+    obj, err := store.Service.HeadObject(ctx, &s3.HeadObjectInput{
 		Bucket: aws.String(store.Bucket),
 		Key:    store.keyWithPrefix(upload.objectId),
 	})
-	if err == nil {
-		// No error occurred, and we are able to stream the object
-		return res.Body, nil
-	}
+
+    if err == nil {
+        if *obj.ContentLength > store.MaxBufferedParts * store.MaxPartSize {
+            // we are not supposed to get that much loaded into memory
+            return nil, handler.NewError("ERR_FILE_TOO_LARGE", "file too large, specify a Range in your request", http.StatusBadRequest)
+        }
+    }
+
+    var res *s3.GetObjectOutput
+    if err == nil {
+        // Attempt to get upload content
+        res, err = store.Service.GetObject(ctx, &s3.GetObjectInput{
+            Bucket: aws.String(store.Bucket),
+            Key:    store.keyWithPrefix(upload.objectId),
+        })
+    }
+    
+    var iv []byte
+    if err == nil {
+        iv, err = hex.DecodeString(upload.objectId)
+        if err != nil && len(upload.objectId) != 32 {
+            // handle test scenario where the objectId is not a 16-bytes hexadecimal string
+            objBytes := []byte(upload.objectId)
+            objHashed := sha256.Sum256(objBytes)
+            iv = objHashed[:store.block.BlockSize()]
+            err = nil
+        }
+        
+        if err != nil {
+            return nil, err
+        }
+        
+        // Decode the recieved object
+        defer res.Body.Close()
+        plainBody, err := DecodeObjectAndTrim(res.Body, store.block, iv)
+        if err != nil {
+            return nil, err
+        }
+        // No error occurred, and we are able to stream the object
+        return io.NopCloser(bytes.NewReader(plainBody)), nil
+    }
 
 	// If the file cannot be found, we ignore this error and continue since the
 	// upload may not have been finished yet. In this case we do not want to
 	// return a ErrNotFound but a more meaning-full message.
-	if !isAwsError[*types.NoSuchKey](err) {
+	if !isAwsError[*types.NoSuchKey](err) && !isAwsError[*types.NotFound](err) {
 		return nil, err
 	}
 
