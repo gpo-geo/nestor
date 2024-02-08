@@ -14,6 +14,7 @@ import (
     "github.com/aws/aws-sdk-go-v2/service/s3"
     
     nestore "github.com/gpo-geo/nestor/store"
+    nestrange "github.com/gpo-geo/nestor/handler"
 )
 
 var flags struct {
@@ -41,6 +42,7 @@ func setup_default_flags() {
     flags.S3TransferAcceleration = false
     flags.EncryptionKey = "champignon"
 }
+
 
 func main() {
 
@@ -102,10 +104,14 @@ func main() {
             fmt.Printf("Upload %s finished\n", event.Upload.ID)
         }
     }()
+    
+    // Create a dedicated handler for range download
+    rangeDownloadHandler := nestrange.RangeDownloadHandler{&store, "/download/"}
 
     // Right now, nothing has happened since we need to start the HTTP server on
     // our own. In the end, tusd will start listening on and accept request at
     // http://localhost:8080/files
+    http.Handle("/download/", http.StripPrefix("/download/", rangeDownloadHandler))
     http.Handle("/files/", http.StripPrefix("/files/", handler))
     err = http.ListenAndServe(":8080", nil)
     if err != nil {
