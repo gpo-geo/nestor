@@ -90,25 +90,19 @@ func EncodePortableObject(src io.Reader, block cipher.Block, iv []byte) ([]byte,
 }
 
 
-// Decode the input data from a ReadCloser, using a given block cipher and an IV. The size parameter
-// is the guess size of the source data
+// Decode the input data from a ReadCloser, using a given block cipher and an IV.
 // Returns the decoded data
-func DecodeObject(src io.Reader, size int64, block cipher.Block, iv []byte) ([]byte, error ) {
+func DecodeObject(src io.Reader, block cipher.Block, iv []byte) ([]byte, error ) {
 
     inBuffer, err := io.ReadAll(src)
     if err != nil {
 		return nil, err
 	}
-    
-    // TODO : implement a Reader wrapper for this
-    if len(inBuffer) < int(size) {
-        return nil, errors.New("Original message is larger than ciphertext")
-    }
 
     mode := cipher.NewCBCDecrypter(block, iv)
     mode.CryptBlocks(inBuffer, inBuffer)
 
-    return inBuffer[:size], nil
+    return inBuffer, nil
 }
 
 

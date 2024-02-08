@@ -77,6 +77,22 @@ func TestEncrypt(t *testing.T) {
     }
 }
 
+func TestGenData(t *testing.T) {
+    key, _ := hex.DecodeString("2d0bdf858c4ae3c86ec21fefa9e77c35a7bb0f25a9d55febc337c82da91fc75d")
+    iv, _ := hex.DecodeString("f289c525d331300f3599c1f6da1cbf8e")
+    plaintext := []byte("hello world")
+    
+    block, err := aes.NewCipher(key)
+    if err != nil {
+        t.Fatal(err)
+    }
+    
+    myPlainReader := bytes.NewReader(plaintext)
+    ciphertext, _, err := EncodePortableObject(myPlainReader, block, iv)
+    
+    fmt.Printf("cipher %x\n", ciphertext)
+}
+
 func TestDecrypt(t *testing.T) {
     key, _ := hex.DecodeString("6368616e676520746869732070617373")
     ciphertext, _ := hex.DecodeString("93a0c59482a10688ecc07eae98a690c504b4ff3767248fae7eb4238c51cd011059a0b9de602fdc4a305e7611b82a7c86f798460dfb1b10a74c490e0614739cc868f642061cd56b552b1f20c74b5581cf")
@@ -115,13 +131,13 @@ func TestDecrypt(t *testing.T) {
     
     // check with DecodeObject
     fakeReader := bytes.NewReader(ciphertext)
-    otherresult, err := DecodeObject(fakeReader, int64(original_length), block, iv)
+    otherresult, err := DecodeObject(fakeReader, block, iv)
     if err != nil {
         t.Fatal(err)
     }
     
-    if ! bytes.Equal(otherresult, plaintext) {
-        fmt.Printf("'%s' vs '%s'", otherresult, plaintext)
+    if ! bytes.Equal(otherresult[:original_length], plaintext) {
+        fmt.Printf("'%s' vs '%s'", otherresult[:original_length], plaintext)
         t.Fatal("Output of DecodeObject is different from original text")
     }
 }
