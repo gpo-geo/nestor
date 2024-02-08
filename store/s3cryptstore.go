@@ -680,14 +680,15 @@ func (upload cryptUpload) fetchInfo(ctx context.Context) (info handler.FileInfo,
 }
 
 func (upload cryptUpload) GetReader(ctx context.Context) (io.ReadCloser, error) {
-    res, err := upload.GetRangeReader(ctx, int64(0), int64(-1))
+    store := upload.store
+    res, err := store.RangeReader(ctx, upload.objectId, upload.multipartId, int64(0), int64(-1))
     return res, err
 }
 
-func (upload cryptUpload) GetRangeReader(ctx context.Context, start int64, length int64) (io.ReadCloser, error) {
-	store := upload.store
+func (store EncryptedStore) RangeReader(ctx context.Context, objectId string, multipartId string, start int64, length int64) (io.ReadCloser, error) {
+	//~ store := upload.store
     
-    objSize, err := store.headUploadedObject(ctx, upload.objectId, upload.multipartId)
+    objSize, err := store.headUploadedObject(ctx, objectId, multipartId)
     
     if err != nil {
         return nil, err
@@ -700,6 +701,12 @@ func (upload cryptUpload) GetRangeReader(ctx context.Context, start int64, lengt
     if objSize > store.MaxBufferedParts * store.MaxPartSize {
         // we are not supposed to get that much loaded into memory
         return nil, handler.NewError("ERR_FILE_TOO_LARGE", "file too large, specify a Range in your request", http.StatusBadRequest)
+    }
+    
+    blocksize := int64(store.block.BlockSize())
+    if objSize % blocksize != 0 {
+        // unknown encoding
+        return nil, errors.New("object size not a multiple of block size")
     }
     
     // Compute range for decoded file to serve (convention for range end is same as slices)
@@ -721,7 +728,7 @@ func (upload cryptUpload) GetRangeReader(ctx context.Context, start int64, lengt
     
     // Compute range to encoded file + previous block
     hasPreviousBlock := true
-    blocksize := int64(store.block.BlockSize())
+    
     encoded_start := range_start - (range_start % blocksize) - blocksize
     if encoded_start < 0 {
         encoded_start = 0
@@ -732,10 +739,10 @@ func (upload cryptUpload) GetRangeReader(ctx context.Context, start int64, lengt
 
     // Compute initial IV
     var iv []byte
-    iv, err = hex.DecodeString(upload.objectId)
-    if err != nil && len(upload.objectId) != 2 * int(blocksize) {
+    iv, err = hex.DecodeString(objectId)
+    if err != nil && len(objectId) != 2 * int(blocksize) {
         // handle test scenario where the objectId is not a 16-bytes hexadecimal string
-        objBytes := []byte(upload.objectId)
+        objBytes := []byte(objectId)
         objHashed := sha256.Sum256(objBytes)
         iv = objHashed[:blocksize]
         err = nil
@@ -747,15 +754,12 @@ func (upload cryptUpload) GetRangeReader(ctx context.Context, start int64, lengt
     // Attempt to get upload content
     res, err := store.Service.GetObject(ctx, &s3.GetObjectInput{
         Bucket: aws.String(store.Bucket),
-        Key:    store.keyWithPrefix(upload.objectId),
+        Key:    store.keyWithPrefix(objectId),
         Range:  aws.String(encoded_range),
     })
     if err != nil {
         return nil, err
     }
-    
-    fmt.Printf("hasPreviousBlock: %v\n", hasPreviousBlock)
-    
     
     // Decode the recieved object
     defer res.Body.Close()
@@ -767,7 +771,13 @@ func (upload cryptUpload) GetRangeReader(ctx context.Context, start int64, lengt
     if err != nil {
         return nil, errors.New("Can't read first bloc")
     }
-    plaintext, err := DecodeObjectAndTrim(res.Body, store.block, iv)
+
+    var plaintext []byte
+    if encoded_end >= objSize {
+        plaintext, err = DecodeObjectAndTrim(res.Body, store.block, iv)
+    } else {
+        plaintext, err = DecodeObject(res.Body, store.block, iv)
+    }
     if err != nil {
         return nil, err
     }
