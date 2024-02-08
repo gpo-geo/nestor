@@ -698,11 +698,6 @@ func (store EncryptedStore) RangeReader(ctx context.Context, objectId string, mu
         return nil, errors.New("Empty object")
     }
     
-    if objSize > store.MaxBufferedParts * store.MaxPartSize {
-        // we are not supposed to get that much loaded into memory
-        return nil, handler.NewError("ERR_FILE_TOO_LARGE", "file too large, specify a Range in your request", http.StatusBadRequest)
-    }
-    
     blocksize := int64(store.block.BlockSize())
     if objSize % blocksize != 0 {
         // unknown encoding
@@ -724,6 +719,11 @@ func (store EncryptedStore) RangeReader(ctx context.Context, objectId string, mu
     }
     if range_end > objSize {
         range_end = objSize
+    }
+    
+    if (range_start - range_end) > store.MaxBufferedParts * store.MaxPartSize {
+        // we are not supposed to get that much loaded into memory
+        return nil, handler.NewError("ERR_FILE_TOO_LARGE", "file too large, specify a smaller Range in your request", http.StatusBadRequest)
     }
     
     // Compute range to encoded file + previous block

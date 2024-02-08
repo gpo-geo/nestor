@@ -6,12 +6,13 @@ Features implemented:
 
 * Upload of files (of any size) by chunks
 * Encryption before sending to a S3 bucket
-* Download of files
+* Download and decryption of files
+* Range download to get portions of data
 
 TODO:
 
-* Decryption on downloaded files
-* Range download to get portions of data
+* Integrate a CLI framework to setup input key, ports, part size, ...
+
 
 ## Setup requirement
 
@@ -100,7 +101,13 @@ curl -i -X PATCH \
 * "download" the complete file
 
 ```
-curl -o output.dat http://localhost:8080/files/$TOKEN
+curl -o output.dat http://localhost:8080/download/$TOKEN
+```
+
+* "download" portion of the file
+
+```
+curl -o output.dat -H "Range: bytes=0-999" http://localhost:8080/download/$TOKEN
 ```
 
 ## Design choice
