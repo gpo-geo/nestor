@@ -1,12 +1,15 @@
 package handler
 
 import (
+    "context"
     "errors"
-    "fmt"
+    //~ "fmt"
+    "io"
     "net/http"
     "net/textproto"
     "strings"
     "strconv"
+    "time"
     
     "github.com/gpo-geo/nestor/store"
 )
@@ -36,13 +39,29 @@ func (h RangeDownloadHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) 
         return
     }
 
-    // create context
+    // get context
+    ctx := r.Context()
     
-    // call h.Store.GetRangeReader()
+    // parse id
+    id := strings.Trim(r.URL.Path, "/")
+    index := strings.Index(id, "+")
+    if index == -1 {
+        http.Error(w, "Wrong requested id", http.StatusBadRequest)
+        return
+    }
+
+    objectId := id[:index]
+    multipartId := id[index+1:]
+
+    // call RangeReader()
+    out, err := h.Store.RangeReader(ctx, objectId, multipartId, start, length)
+    if err != nil {
+        http.Error(w, "Error while fetching the file: "+err.Error() , http.StatusInternalServerError)
+        return
+    }
     
-    
-    // DEBUG
-    fmt.Fprintf(w, "Dowload with range %d, %d\n", start, length)
+    io.Copy(w, out)
+    out.Close()
 }
 
 // parse a HTTP range, returns the start position and length. If start position is negative, it
