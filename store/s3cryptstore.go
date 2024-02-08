@@ -680,84 +680,107 @@ func (upload cryptUpload) fetchInfo(ctx context.Context) (info handler.FileInfo,
 }
 
 func (upload cryptUpload) GetReader(ctx context.Context) (io.ReadCloser, error) {
+    res, err := upload.GetRangeReader(ctx, int64(0), int64(-1))
+    return res, err
+}
+
+func (upload cryptUpload) GetRangeReader(ctx context.Context, start int64, length int64) (io.ReadCloser, error) {
 	store := upload.store
     
-    // Check before we get files too large
-    obj, err := store.Service.HeadObject(ctx, &s3.HeadObjectInput{
-		Bucket: aws.String(store.Bucket),
-		Key:    store.keyWithPrefix(upload.objectId),
-	})
-
-    if err == nil {
-        if *obj.ContentLength > store.MaxBufferedParts * store.MaxPartSize {
-            // we are not supposed to get that much loaded into memory
-            return nil, handler.NewError("ERR_FILE_TOO_LARGE", "file too large, specify a Range in your request", http.StatusBadRequest)
-        }
-    }
-
-    var res *s3.GetObjectOutput
-    if err == nil {
-        // Attempt to get upload content
-        res, err = store.Service.GetObject(ctx, &s3.GetObjectInput{
-            Bucket: aws.String(store.Bucket),
-            Key:    store.keyWithPrefix(upload.objectId),
-        })
+    objSize, err := store.headUploadedObject(ctx, upload.objectId, upload.multipartId)
+    
+    if err != nil {
+        return nil, err
     }
     
+    if objSize == 0 {
+        return nil, errors.New("Empty object")
+    }
+    
+    if objSize > store.MaxBufferedParts * store.MaxPartSize {
+        // we are not supposed to get that much loaded into memory
+        return nil, handler.NewError("ERR_FILE_TOO_LARGE", "file too large, specify a Range in your request", http.StatusBadRequest)
+    }
+    
+    // Compute range for decoded file to serve (convention for range end is same as slices)
+    range_start := start
+    if start < 0 {
+        range_start = objSize + start
+    }
+    if range_start < 0 {
+        range_start = 0
+    }
+    
+    range_end := objSize
+    if length > 0 {
+        range_end = range_start + length
+    }
+    if range_end > objSize {
+        range_end = objSize
+    }
+    
+    // Compute range to encoded file + previous block
+    hasPreviousBlock := true
+    blocksize := int64(store.block.BlockSize())
+    encoded_start := range_start - (range_start % blocksize) - blocksize
+    if encoded_start < 0 {
+        encoded_start = 0
+        hasPreviousBlock = false
+    }
+    encoded_end := RoundToNextMultiple(range_end, blocksize)
+    encoded_range := fmt.Sprintf("bytes=%d-%d", encoded_start, encoded_end - int64(1))
+
+    // Compute initial IV
     var iv []byte
-    if err == nil {
-        iv, err = hex.DecodeString(upload.objectId)
-        if err != nil && len(upload.objectId) != 32 {
-            // handle test scenario where the objectId is not a 16-bytes hexadecimal string
-            objBytes := []byte(upload.objectId)
-            objHashed := sha256.Sum256(objBytes)
-            iv = objHashed[:store.block.BlockSize()]
-            err = nil
-        }
-        
-        if err != nil {
-            return nil, err
-        }
-        
-        // Decode the recieved object
-        defer res.Body.Close()
-        plainBody, err := DecodeObjectAndTrim(res.Body, store.block, iv)
-        if err != nil {
-            return nil, err
-        }
-        // No error occurred, and we are able to stream the object
-        return io.NopCloser(bytes.NewReader(plainBody)), nil
+    iv, err = hex.DecodeString(upload.objectId)
+    if err != nil && len(upload.objectId) != 2 * int(blocksize) {
+        // handle test scenario where the objectId is not a 16-bytes hexadecimal string
+        objBytes := []byte(upload.objectId)
+        objHashed := sha256.Sum256(objBytes)
+        iv = objHashed[:blocksize]
+        err = nil
+    }
+    if err != nil {
+        return nil, err
     }
 
-	// If the file cannot be found, we ignore this error and continue since the
-	// upload may not have been finished yet. In this case we do not want to
-	// return a ErrNotFound but a more meaning-full message.
-	if !isAwsError[*types.NoSuchKey](err) && !isAwsError[*types.NotFound](err) {
-		return nil, err
-	}
+    // Attempt to get upload content
+    res, err := store.Service.GetObject(ctx, &s3.GetObjectInput{
+        Bucket: aws.String(store.Bucket),
+        Key:    store.keyWithPrefix(upload.objectId),
+        Range:  aws.String(encoded_range),
+    })
+    if err != nil {
+        return nil, err
+    }
+    
+    fmt.Printf("hasPreviousBlock: %v\n", hasPreviousBlock)
+    
+    
+    // Decode the recieved object
+    defer res.Body.Close()
 
-	// Test whether the multipart upload exists to find out if the upload
-	// never existsted or just has not been finished yet
-	_, err = store.Service.ListParts(ctx, &s3.ListPartsInput{
-		Bucket:   aws.String(store.Bucket),
-		Key:      store.keyWithPrefix(upload.objectId),
-		UploadId: aws.String(upload.multipartId),
-		MaxParts: aws.Int32(0),
-	})
-	if err == nil {
-		// The multipart upload still exists, which means we cannot download it yet
-		return nil, handler.NewError("ERR_INCOMPLETE_UPLOAD", "cannot stream non-finished upload", http.StatusBadRequest)
-	}
+    //~ var n int
+    if hasPreviousBlock {
+        _, err = res.Body.Read(iv)
+    }
+    if err != nil {
+        return nil, errors.New("Can't read first bloc")
+    }
+    plaintext, err := DecodeObjectAndTrim(res.Body, store.block, iv)
+    if err != nil {
+        return nil, err
+    }
 
-	// The AWS Go SDK v2 has a bug where types.NoSuchUpload is not returned,
-	// so we also need to check the error code itself.
-	// See https://github.com/aws/aws-sdk-go-v2/issues/1635
-	if isAwsError[*types.NoSuchUpload](err) || isAwsErrorCode(err, "NoSuchUpload") {
-		// Neither the object nor the multipart upload exists, so we return a 404
-		return nil, handler.ErrNotFound
-	}
-
-	return nil, err
+    length_plaintext := int64(len(plaintext))
+    start_plaintext := range_start - range_start % blocksize
+    end_plaintext := range_end-start_plaintext
+    if end_plaintext > length_plaintext {
+        end_plaintext = length_plaintext
+    }
+    requestedPlaintext := plaintext[(range_start % blocksize):end_plaintext]
+    // No error occurred, and we are able to stream the object
+    return io.NopCloser(bytes.NewReader(requestedPlaintext)), nil
 }
 
 //~ func (upload cryptUpload) Terminate(ctx context.Context) error {
@@ -1260,6 +1283,49 @@ func (store EncryptedStore) releaseUploadSemaphore() {
 	//~ store.uploadSemaphoreDemandMetric.Dec()
 }
 
+func (store EncryptedStore) headUploadedObject(ctx context.Context, uploadId string, multipart string) (int64, error) {
+    // Check before we get files too large
+    obj, err := store.Service.HeadObject(ctx, &s3.HeadObjectInput{
+		Bucket: aws.String(store.Bucket),
+		Key:    store.keyWithPrefix(uploadId),
+	})
+    
+    if err == nil {
+        return *obj.ContentLength, nil
+    }
+    
+    // If the file cannot be found, we ignore this error and continue since the
+	// upload may not have been finished yet. In this case we do not want to
+	// return a ErrNotFound but a more meaning-full message.
+	if !isAwsError[*types.NoSuchKey](err) && !isAwsError[*types.NotFound](err) {
+		return 0, err
+	}
+
+	// Test whether the multipart upload exists to find out if the upload
+	// never existsted or just has not been finished yet
+	_, err = store.Service.ListParts(ctx, &s3.ListPartsInput{
+		Bucket:   aws.String(store.Bucket),
+		Key:      store.keyWithPrefix(uploadId),
+		UploadId: aws.String(multipart),
+		MaxParts: aws.Int32(0),
+	})
+	if err == nil {
+		// The multipart upload still exists, which means we cannot download it yet
+		return 0, handler.NewError("ERR_INCOMPLETE_UPLOAD", "cannot stream non-finished upload", http.StatusBadRequest)
+	}
+
+	// The AWS Go SDK v2 has a bug where types.NoSuchUpload is not returned,
+	// so we also need to check the error code itself.
+	// See https://github.com/aws/aws-sdk-go-v2/issues/1635
+	if isAwsError[*types.NoSuchUpload](err) || isAwsErrorCode(err, "NoSuchUpload") {
+		// Neither the object nor the multipart upload exists, so we return a 404
+		return 0, handler.ErrNotFound
+	}
+
+	return 0, err
+}
+
+
 // from tusd internals
 
 func Uid() string {
@@ -1289,3 +1355,4 @@ func (s Semaphore) Acquire() {
 func (s Semaphore) Release() {
 	<-s
 }
+

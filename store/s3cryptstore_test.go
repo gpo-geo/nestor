@@ -541,6 +541,7 @@ func TestGetReader(t *testing.T) {
     s3obj.EXPECT().GetObject(context.Background(), &s3.GetObjectInput{
         Bucket: aws.String("bucket"),
         Key:    aws.String("uploadId"),
+        Range:  aws.String("bytes=0-15"),
     }).Return(&s3.GetObjectOutput{
         Body: io.NopCloser(bytes.NewReader(ciphertext)),
     }, nil)
